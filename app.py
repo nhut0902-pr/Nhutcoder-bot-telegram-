@@ -1,159 +1,136 @@
-from flask import Flask, request, render_template_string
 import requests
 import os
-import feedparser
-from google import genai
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-app = Flask(__name__)
+TOKEN = os.getenv("TOKEN")
 
-TOKEN = ""
-client = genai.Client()  # lấy API từ ENV
+# API endpoints
+API_MB = "https://freeapi.pro.vn/api/xo-so/mien-bac"
+API_MT = "https://freeapi.pro.vn/api/xo-so/mien-trung"
+API_MN = "https://freeapi.pro.vn/api/xo-so/mien-nam"
 
-HTML = """
-<h2>🤖 Setup Bot</h2>
-<form method="post">
-Token:<br><input name="token"><br><br>
-<button type="submit">Save</button>
-</form>
-"""
-
-# ===== AI (Gemini 3 Flash) =====
-def ask_ai(prompt):
+# ================== HELPER ==================
+def fetch(url):
     try:
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        return f"❌ AI lỗi: {e}"
+        return requests.get(url, timeout=10).json()
+    except:
+        return None
 
-# ===== SEARCH =====
-def search_web(query):
-    url = "https://api.duckduckgo.com/"
-    params = {"q": query, "format": "json"}
-    res = requests.get(url, params=params).json()
+def format_kq(data):
+    try:
+        return f"""
+📅 {data['date']}
+🎯 ĐB: {data['db']}
+🥇 G1: {data['g1']}
+🥈 G2: {', '.join(data['g2'])}
+🥉 G3: {', '.join(data['g3'])}
+"""
+    except:
+        return "❌ Lỗi format dữ liệu"
 
-    if res.get("AbstractText"):
-        return res["AbstractText"]
+# ================== COMMAND ==================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Bot xổ số\n\n"
+        "/mb - Miền Bắc\n"
+        "/mt - Miền Trung\n"
+        "/mn - Miền Nam\n"
+        "/tinh khanhhoa\n"
+        "/do 68"
+    )
 
-    if res.get("RelatedTopics"):
-        try:
-            return res["RelatedTopics"][0]["Text"]
-        except:
-            return "❌ Không tìm thấy!"
+# ===== MIỀN =====
+async def mb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = fetch(API_MB)
+    await update.message.reply_text(format_kq(data) if data else "❌ Lỗi API")
 
-    return "❌ Không có kết quả!"
+async def mt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = fetch(API_MT)
+    await update.message.reply_text(format_kq(data) if data else "❌ Lỗi API")
 
-def search_ai(query):
-    raw = search_web(query)
-    return ask_ai(f"Tóm tắt ngắn gọn:\n{raw}")
+async def mn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = fetch(API_MN)
+    await update.message.reply_text(format_kq(data) if data else "❌ Lỗi API")
 
-# ===== IMAGE =====
-def search_image(query):
-    return f"https://source.unsplash.com/600x400/?{query}"
+# ===== THEO TỈNH =====
+async def tinh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Ví dụ: /tinh khanhhoa")
+        return
 
-# ===== YOUTUBE =====
-def search_youtube(query):
-    return f"https://www.youtube.com/results?search_query={query}"
+    name = context.args[0].lower()
 
-# ===== NEWS =====
-def get_news(category):
-    urls = {
-        "ai": "https://feeds.feedburner.com/oreilly/radar/atom",
-        "crypto": "https://cointelegraph.com/rss",
-        "tech": "https://feeds.arstechnica.com/arstechnica/index"
-    }
+    data_mt = fetch(API_MT)
+    data_mn = fetch(API_MN)
 
-    if category not in urls:
-        return "❌ Sai category!"
+    # gộp miền trung + nam
+    all_data = []
+    if data_mt: all_data.append(data_mt)
+    if data_mn: all_data.append(data_mn)
 
-    feed = feedparser.parse(urls[category])
-    text = f"📰 Tin {category}:\n\n"
+    for region in all_data:
+        for province in region.get("provinces", []):
+            if name in province["name"].lower().replace(" ", ""):
+                msg = f"📍 {province['name']}\n"
+                msg += f"🎯 ĐB: {province['db']}\n"
+                msg += f"🥇 G1: {province['g1']}\n"
+                await update.message.reply_text(msg)
+                return
 
-    for entry in feed.entries[:5]:
-        text += f"🔹 {entry.title}\n{entry.link}\n\n"
+    await update.message.reply_text("❌ Không tìm thấy tỉnh")
 
-    return text
+# ===== DÒ SỐ =====
+async def do(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Ví dụ: /do 68")
+        return
 
-# ===== TREND =====
-def get_trend():
-    return "🔥 Trending:\n- AI tools\n- Crypto pump\n- TikTok viral 😆"
+    number = context.args[0]
 
-# ===== SEND =====
-def send(chat_id, text):
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text[:4000]
-    })
+    data_all = [fetch(API_MB), fetch(API_MT), fetch(API_MN)]
+    found = []
 
-# ===== WEBHOOK =====
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
+    for data in data_all:
+        if not data:
+            continue
 
-    if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
+        # miền Bắc
+        if "db" in data:
+            for key, val in data.items():
+                if isinstance(val, list):
+                    for v in val:
+                        if number in str(v):
+                            found.append(v)
+                else:
+                    if number in str(val):
+                        found.append(val)
 
-        if text == "/start":
-            send(chat_id,
-                "🤖 Bot PRO ready!\n\n"
-                "/ai hỏi\n"
-                "/search keyword\n"
-                "/image keyword\n"
-                "/yt keyword\n"
-                "/news ai|crypto|tech\n"
-                "/trend"
-            )
+        # miền Trung/Nam
+        if "provinces" in data:
+            for p in data["provinces"]:
+                for key, val in p.items():
+                    if isinstance(val, list):
+                        for v in val:
+                            if number in str(v):
+                                found.append(v)
+                    else:
+                        if number in str(val):
+                            found.append(val)
 
-        elif text.startswith("/ai"):
-            q = text.replace("/ai", "").strip()
-            send(chat_id, ask_ai(q))
+    if found:
+        await update.message.reply_text(f"🎉 TRÚNG: {', '.join(found)}")
+    else:
+        await update.message.reply_text("❌ Không trúng")
 
-        elif text.startswith("/search"):
-            q = text.replace("/search", "").strip()
-            send(chat_id, search_ai(q))
+# ================== RUN ==================
+app = ApplicationBuilder().token(TOKEN).build()
 
-        elif text.startswith("/image"):
-            q = text.replace("/image", "").strip()
-            send(chat_id, search_image(q))
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("mb", mb))
+app.add_handler(CommandHandler("mt", mt))
+app.add_handler(CommandHandler("mn", mn))
+app.add_handler(CommandHandler("tinh", tinh))
+app.add_handler(CommandHandler("do", do))
 
-        elif text.startswith("/yt"):
-            q = text.replace("/yt", "").strip()
-            send(chat_id, search_youtube(q))
-
-        elif text.startswith("/news"):
-            parts = text.split()
-            if len(parts) < 2:
-                send(chat_id, "❌ /news ai | crypto | tech")
-            else:
-                send(chat_id, get_news(parts[1]))
-
-        elif text == "/trend":
-            send(chat_id, get_trend())
-
-        else:
-            send(chat_id, "❓ Không hiểu lệnh")
-
-    return "ok"
-
-# ===== SETUP WEB =====
-@app.route("/", methods=["GET", "POST"])
-def setup():
-    global TOKEN
-
-    if request.method == "POST":
-        TOKEN = request.form["token"]
-        set_webhook()
-        return "✅ Bot ready!"
-
-    return render_template_string(HTML)
-
-def set_webhook():
-    url = os.getenv("RENDER_EXTERNAL_URL") + "/webhook"
-    requests.get(f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={url}")
-
-# ===== RUN =====
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+app.run_polling()
