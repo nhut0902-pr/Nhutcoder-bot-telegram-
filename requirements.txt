@@ -1,5 +1,5 @@
-python-telegram-bot
+flask
+pyTelegramBotAPI
+discord.py
+requests
 cloudscraper
-beautifulsoup4
-lxml
-nest-asyncio
